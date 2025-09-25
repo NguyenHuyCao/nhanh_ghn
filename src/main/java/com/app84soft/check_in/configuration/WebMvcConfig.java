@@ -43,7 +43,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
         registry.addInterceptor(rateLimitInterceptor).addPathPatterns("/**");
         registry.addInterceptor(trackLogRequestInterceptor).addPathPatterns("/**");
         registry.addInterceptor(adminInterceptor).addPathPatterns("/api/admin/v*/**")
-                .excludePathPatterns("/api/admin/v*/auth/**");
+                .excludePathPatterns("/api/admin/v*/auth/refresh", "/api/admin/v*/auth/logout");
     }
 
     @Override

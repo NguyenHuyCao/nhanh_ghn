@@ -48,7 +48,7 @@ public class SecurityConfig {
                                 "/actuator/health", "/actuator/info",
                                 "/webjars/**", "/static/**"
                         ).permitAll()
-                        .requestMatchers("/api/v*/auth/**", "/api/admin/v*/auth/**").permitAll()
+                        .requestMatchers("/api/v*/auth/**", "/api/admin/v*/auth/refresh", "/api/admin/v*/auth/logout").permitAll()
                         .anyRequest().permitAll()
                 )
                 .exceptionHandling(e -> e.authenticationEntryPoint(unauthorizedHandler));

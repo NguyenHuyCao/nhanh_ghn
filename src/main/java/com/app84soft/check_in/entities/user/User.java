@@ -39,7 +39,7 @@ public class User extends BaseEntity {
 
     @Enumerated(EnumType.ORDINAL)
     @Column(name = "role_type", nullable = false, columnDefinition = "INT")
-    RoleType roleType = RoleType.USER; // ADMIN/USER/STUDENT
+    RoleType roleType = RoleType.USER;
 
     @Enumerated(EnumType.ORDINAL)
     @Column(name = "status", nullable = false, columnDefinition = "INT")
