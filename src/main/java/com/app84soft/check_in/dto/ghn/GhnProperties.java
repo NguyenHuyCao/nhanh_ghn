@@ -6,10 +6,11 @@ import org.springframework.stereotype.Component;
 
 @Data
 @Component
-@ConfigurationProperties(prefix = "ghn")
+@ConfigurationProperties(prefix = "ghn.api")
 public class GhnProperties {
-    private String baseUrl = "https://dev-online-gateway.ghn.vn/shiip/public-api";
+    private String baseUrl;
     private String token;
     private Long shopId;
 }
+
 
