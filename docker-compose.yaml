@@ -1,0 +1,14 @@
+version: '3'
+services:
+  web:
+    image: touchspace/zalo-checkin:be
+    container_name: zalo-checkin
+    network_mode: host
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    volumes:
+      - ./application.properties:/app/config/application.properties
+      - ./log/:/app/log/
+      - ./media:/app/media/
+    restart: unless-stopped
