@@ -21,7 +21,7 @@ public class ShippingAdminController {
     private final GhnClient ghnClient;
     private final GhnSheetService ghnSheetService;
 
-    @GetMapping("/sheet/white")
+    @GetMapping("/sheet/")
     @Operation(summary = "GHN - Bảng trắng (đối soát COD/ship/hoàn)")
     public ResponseEntity<?> whiteSheet(
             @RequestParam(required=false) @DateTimeFormat(pattern="yyyy-MM-dd") LocalDate from,

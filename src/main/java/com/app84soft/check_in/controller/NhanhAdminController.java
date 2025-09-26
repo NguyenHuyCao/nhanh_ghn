@@ -61,7 +61,7 @@ public class NhanhAdminController {
 
     /* ===================== SHEET (Yellow) ===================== */
 
-    @GetMapping("/sheet/yellow")
+    @GetMapping("/sheet/")
     @Operation(summary = "Bảng sheet")
     public ResponseEntity<Map<String, Object>> yellow(
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate from,
@@ -193,7 +193,7 @@ public class NhanhAdminController {
     /* ===================== SUMMARY ===================== */
 
     @GetMapping("/summary")
-    @Operation(summary = "Tổng hợp nhanh")
+    @Operation(summary = "Tổng hợp sheet")
     public ResponseEntity<Map<String, Object>> summary(
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate from,
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate to,

@@ -12,5 +12,6 @@ public class NhanhProperties {
     private String appId;
     private String businessId;
     private String staticToken;
-    private long   tokenCacheSeconds = 3500;
+    private int tokenCacheSeconds = 1800;
 }
+

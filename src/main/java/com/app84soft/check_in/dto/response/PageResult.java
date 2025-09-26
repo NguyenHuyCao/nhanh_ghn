@@ -4,11 +4,12 @@ import lombok.*;
 
 import java.util.List;
 
-@Data @AllArgsConstructor @NoArgsConstructor
+@Data
+@AllArgsConstructor
 public class PageResult<T> {
     private int page;
     private int limit;
-    private int total;
+    private long total;
     private int totalPages;
     private List<T> items;
 }

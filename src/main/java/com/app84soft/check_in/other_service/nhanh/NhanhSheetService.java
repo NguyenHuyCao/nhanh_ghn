@@ -3,6 +3,7 @@ package com.app84soft.check_in.other_service.nhanh;
 import com.app84soft.check_in.dto.nhanh.response.*;
 import com.app84soft.check_in.dto.response.PageResult;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -16,12 +17,9 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Dịch vụ gom dữ liệu “Bảng vàng” từ POS Nhanh (/api/order/index) và các nhóm dữ liệu con.
- *
- * - from/to: có thể null. Controller của bạn đã chuẩn hoá (fill mặc định). Ở đây vẫn phòng hờ.
- * - Bao gồm ngày kết thúc: khi gọi POS sẽ truyền toDate + 1 ngày.
- * - Với khoảng ngày lớn, POS thường giới hạn -> service sẽ tự CHIA NHỎ theo cửa sổ (MAX_DAYS_PER_CALL) và GỘP.
- * - Riêng endpoint /sheet/yellow dùng PageResult {page, limit, total, totalPages, items}.
+ * Gom dữ liệu “Bảng vàng” từ POS Nhanh (/api/order/index) và các nhóm dữ liệu con.
+ * - Filter ngày dùng yyyy-MM-dd; toDate gửi end + 1 day (do POS end-exclusive).
+ * - Khoảng lớn: chia nhỏ theo cửa sổ (MAX_DAYS_PER_CALL) + phân trang chính xác theo tổng thực.
  */
 @Service
 @RequiredArgsConstructor
@@ -33,43 +31,110 @@ public class NhanhSheetService {
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final java.text.SimpleDateFormat D_FMT = new java.text.SimpleDateFormat("yyyy-MM-dd");
 
-    /** Số ngày tối đa gom trong một lần gọi POS để tránh trả rỗng */
-    private static final int MAX_DAYS_PER_CALL = 2;
+    /** Số ngày tối đa mỗi cửa sổ gọi POS */
+    private static final int MAX_DAYS_PER_CALL = 7;
 
-    /** Mặc định khi from/to null: lấy từ 2000-01-01 đến hôm nay */
+    /** Mặc định khi from/to null */
     private static final LocalDate MIN_DATE_FOR_ALL = LocalDate.of(2000, 1, 1);
 
-    /* ========================= PUBLIC: PAGE (cho controller) ========================= */
+    /* ========================= PAGE (controller dùng) ========================= */
 
-    /** Trả về trang dữ liệu “bảng vàng” (FE dùng {page, total, items}). */
     public PageResult<OrderYellowRowDto> getYellowPage(Date from, Date to, int page, int limit)
             throws JsonProcessingException {
 
-        // Dùng windowFetchOrders – đã xử lý 2 case: có/không có from,to
         WindowFetchResult fr = windowFetchOrders(from, to, page, limit);
 
         List<OrderYellowRowDto> rows = mapOrdersToYellowRows(fr.getPageOrders());
+        if (rows.size() > limit) rows = rows.subList(0, limit);
 
-        // Cắt cứng theo limit để tránh trả 105, 200... dòng
-        if (rows.size() > limit) {
-            rows = rows.subList(0, limit);
-        }
-
-        // total/totalPages lấy từ WindowFetchResult
         return new PageResult<>(page, limit, fr.getTotalRecords(), fr.getTotalPages(), rows);
     }
 
+    /* ========================= RAW & nhóm dữ liệu con ========================= */
 
-
-    /* ========================= PUBLIC: các nhóm dữ liệu con ========================= */
-
-    /** Nguồn thô dùng debug/đối chiếu (gọi 1 lần cho khoảng from/to). */
     public Map<String, Object> getRaw(Date from, Date to, int page, int limit) throws JsonProcessingException {
         Map<String, String> q = buildQuery(from, to, page, limit);
         return nhanhClient.listOrdersIndex(q);
     }
 
-    /** “Bảng vàng”: 1 dòng/SKU; nếu đơn không có item vẫn trả 1 dòng theo đơn. */
+    private List<OrderYellowRowDto> mapOrdersToYellowRows(List<Map<String, Object>> orders) {
+        final int[] stt = {1};
+
+        return orders.stream().flatMap(order -> {
+            Long   idNhanh  = asLong(order.get("id"));
+            String status   = s(fn(order.get("statusName"), order.get("status")));
+            String carrier  = s(fn(order.get("carrierName"), order.get("shippingPartner")));
+            String shipCode = s(fn(order.get("carrierCode"), order.get("shipmentCode")));
+            String phone    = s(fn(order.get("customerMobile"), order.get("customerPhone")));
+            String type     = s(order.get("type"));
+            String created  = toDateTimeString(fn(order.get("createdDateTime"),
+                    order.get("createdTime"),
+                    order.get("createdAt")));
+
+            Long   codPhaiThu    = asLong(fn(order.get("calcTotalMoney"),
+                    order.get("grandTotal"),
+                    order.get("total")));
+            String paymentStatus = s(fn(order.get("paymentStatus"), order.get("paidStatus")));
+
+            String paymentMethod = s(fn(order.get("paymentMethod"), order.get("paymentMethodName")));
+            if (isBlank(paymentMethod)) {
+                boolean isDelivery = (carrier != null && !carrier.isBlank())
+                        || (type != null && type.toLowerCase().contains("giao hàng"));
+                paymentMethod = isDelivery ? "COD" : "Tiền mặt";
+            }
+
+            List<Map<String, Object>> items = listOfMap(fn(
+                    order.get("products"), order.get("items"), order.get("orderItems"), Collections.emptyList()
+            ));
+
+            // Đơn không có item -> vẫn trả 1 dòng theo đơn
+            if (items.isEmpty()) {
+                OrderYellowRowDto row = OrderYellowRowDto.builder()
+                        .stt(stt[0]++)
+                        .ngay(created)
+                        .idNhanh(idNhanh)
+                        .soDienThoaiKhach(phone)
+                        .maSanPham(null)
+                        .size(null)
+                        .giaTienBan(null)
+                        .kenhThanhToan(paymentMethod)
+                        .codPhaiThu(codPhaiThu)
+                        .trangThaiThanhToan(paymentStatus)
+                        .donViVanChuyen(carrier)
+                        .maDonHangVanChuyen(shipCode)
+                        .trangThaiTrenNhanh(status)
+                        .build();
+                return java.util.stream.Stream.of(row);
+            }
+
+            // Có item -> 1 dòng / SKU
+            final String pm = paymentMethod;
+            return items.stream().map(it -> {
+                String sku  = s(fn(it.get("productCode"), it.get("sku"), it.get("productId")));
+                String size = s(fn(it.get("size"), it.get("variantName")));
+                if (isBlank(size)) size = extractSizeFromSku(sku);
+                Long price  = asLong(fn(it.get("price"), it.get("sellPrice"), it.get("unitPrice")));
+
+                return OrderYellowRowDto.builder()
+                        .stt(stt[0]++)
+                        .ngay(created)
+                        .idNhanh(idNhanh)
+                        .soDienThoaiKhach(phone)
+                        .maSanPham(sku)
+                        .size(size)
+                        .giaTienBan(price)
+                        .kenhThanhToan(pm)
+                        .codPhaiThu(codPhaiThu)
+                        .trangThaiThanhToan(paymentStatus)
+                        .donViVanChuyen(carrier)
+                        .maDonHangVanChuyen(shipCode)
+                        .trangThaiTrenNhanh(status)
+                        .build();
+            });
+        }).collect(Collectors.toList());
+    }
+
+
     public List<OrderYellowRowDto> getYellowRows(Date from, Date to, int page, int limit) throws JsonProcessingException {
         WindowFetchResult fr = windowFetchOrders(from, to, page, limit);
         return mapOrdersToYellowRows(fr.getPageOrders());
@@ -227,39 +292,16 @@ public class NhanhSheetService {
         return new SummaryDto(count, subtotal, shipFee, grand, paid, cod, byShip);
     }
 
-    /** Parse int an toàn: cho phép Number hoặc String, null/invalid trả về def. */
-    private static int asInt(Object v, int def) {
-        if (v == null) return def;
-        try {
-            if (v instanceof Number) return ((Number) v).intValue();
-            String s = String.valueOf(v).trim();
-            if (s.isEmpty()) return def;
-            return Integer.parseInt(s);
-        } catch (Exception ignore) {
-            return def;
-        }
-    }
-
-    /** Overload mặc định def=0. */
-    private static int asInt(Object v) {
-        return asInt(v, 0);
-    }
-
     /* ========================= WINDOW FETCH ========================= */
 
-    /**
-     * Chia khoảng ngày lớn thành nhiều cửa sổ <= MAX_DAYS_PER_CALL, gọi POS theo từng cửa sổ,
-     * gộp kết quả, tự cắt theo page/limit, tính total và totalPages cho toàn range.
-     */
-    private WindowFetchResult windowFetchOrders(Date from, Date to, int page, int limit) throws JsonProcessingException {
-        // ----- CASE 1: Không truyền from/to -> gọi POS 1 lần theo page/limit -----
+    private WindowFetchResult windowFetchOrders(Date from, Date to, int page, int limit)
+            throws JsonProcessingException {
+
+        // CASE 1: không có filter ngày -> dùng phân trang của POS
         if (from == null && to == null) {
-            Map<String, String> q = buildQuery(null, null, page, limit); // chỉ có page & limit
+            Map<String, String> q = buildQuery(null, null, page, limit);
             Map<String, Object> resp = nhanhClient.listOrdersIndex(q);
             Map<String, Object> data = asMap(resp.get("data"));
-
-            int totalRecords = asInt(data.get("totalRecords"), 0);
-            int totalPages   = asInt(data.get("totalPages"), 0);
 
             Object ordersObj = (data.get("orders") != null) ? data.get("orders") : data.get("items");
             List<Map<String, Object>> orders = new ArrayList<>();
@@ -268,69 +310,79 @@ public class NhanhSheetService {
             } else if (ordersObj instanceof List) {
                 for (Object v : (List<?>) ordersObj) if (v instanceof Map) orders.add(asMap(v));
             }
+
+            // ⭐ BỔ SUNG 2 DÒNG NÀY
+            int totalRecords = asInt(data.get("totalRecords"), orders.size());
+            int totalPages   = asInt(data.get("totalPages"), (int) Math.ceil(totalRecords / (double) limit));
+
             return new WindowFetchResult(orders, totalRecords, totalPages);
         }
 
-        // ----- CASE 2: Có ít nhất 1 đầu from/to -> dùng window như cũ -----
+        // CASE 2: có from/to -> tự tính tổng thật + lát cắt trang
         LocalDate f = (from == null) ? MIN_DATE_FOR_ALL : toLocalDate(from);
         LocalDate t = (to   == null) ? LocalDate.now()   : toLocalDate(to);
         if (f.isAfter(t)) { LocalDate tmp = f; f = t; t = tmp; }
 
-        int startIndex = Math.max(0, (page - 1) * limit);
-        int endIndexExclusive = startIndex + limit;
+        final int startIndex = Math.max(0, (page - 1) * limit);
+        final int endIndexExclusive = startIndex + limit;
 
-        List<Map<String, Object>> pageOrders = new ArrayList<>();
+        List<Map<String, Object>> pageOrders = new ArrayList<>(limit);
         int totalAll = 0;
+        int globalIdx = 0;
+        final int PER_PAGE = 100;
 
         LocalDate cur = f;
         while (!cur.isAfter(t)) {
-            LocalDate windowEnd = cur.plusDays(MAX_DAYS_PER_CALL - 1);
-            if (windowEnd.isAfter(t)) windowEnd = t;
+            LocalDate winEnd = cur.plusDays(MAX_DAYS_PER_CALL - 1);
+            if (winEnd.isAfter(t)) winEnd = t;
 
-            Map<String, String> q = new LinkedHashMap<>();
-            q.put("fromDate", D_FMT.format(java.sql.Date.valueOf(cur)));
-            q.put("toDate",   D_FMT.format(plusOneDay(java.sql.Date.valueOf(windowEnd))));
-            q.put("page", "1");
-            q.put("limit", "100");
+            int wnPage = 1;
+            while (true) {
+                Map<String, String> q = new LinkedHashMap<>();
+                q.put("fromDate", D_FMT.format(java.sql.Date.valueOf(cur)));
+                q.put("toDate",   D_FMT.format(plusOneDay(java.sql.Date.valueOf(winEnd))));
+                q.put("page",  String.valueOf(wnPage));
+                q.put("limit", String.valueOf(PER_PAGE));
 
-            Map<String, Object> resp = nhanhClient.listOrdersIndex(q);
-            Map<String, Object> data = asMap(resp.get("data"));
-            int totalRecords = asInt(data.get("totalRecords"), 0);
-            totalAll += totalRecords;
+                Map<String, Object> resp = nhanhClient.listOrdersIndex(q);
+                Map<String, Object> data = asMap(resp.get("data"));
 
-            Object ordersObj = (data.get("orders") != null) ? data.get("orders") : data.get("items");
-            List<Map<String, Object>> chunk = new ArrayList<>();
-            if (ordersObj instanceof Map) {
-                ((Map<?, ?>) ordersObj).values().forEach(v -> chunk.add(asMap(v)));
-            } else if (ordersObj instanceof List) {
-                for (Object v : (List<?>) ordersObj) if (v instanceof Map) chunk.add(asMap(v));
-            }
-
-            if (pageOrders.size() < limit) {
-                int beforeThisWindow = totalAll - totalRecords;
-                for (int i = 0; i < chunk.size(); i++) {
-                    int globalIdx = beforeThisWindow + i;
-                    if (globalIdx >= startIndex && globalIdx < endIndexExclusive) {
-                        pageOrders.add(chunk.get(i));
-                        if (pageOrders.size() == limit) break;
-                    }
+                Object ordersObj = (data.get("orders") != null) ? data.get("orders") : data.get("items");
+                List<Map<String, Object>> chunk = new ArrayList<>();
+                if (ordersObj instanceof Map) {
+                    ((Map<?, ?>) ordersObj).values().forEach(v -> chunk.add(asMap(v)));
+                } else if (ordersObj instanceof List) {
+                    for (Object v : (List<?>) ordersObj) if (v instanceof Map) chunk.add(asMap(v));
                 }
+
+                if (chunk.isEmpty()) break;
+
+                totalAll += chunk.size();
+
+                int localStart = Math.max(0, startIndex - globalIdx);
+                int localEnd   = Math.min(chunk.size(), endIndexExclusive - globalIdx);
+                if (localStart < localEnd) {
+                    pageOrders.addAll(chunk.subList(localStart, localEnd));
+                }
+
+                globalIdx += chunk.size();
+
+                if (chunk.size() < PER_PAGE) break;
+                wnPage++;
             }
-            cur = windowEnd.plusDays(1);
+
+            cur = winEnd.plusDays(1);
         }
+
         int totalPages = (limit <= 0) ? 0 : (int) Math.ceil(totalAll / (double) limit);
         return new WindowFetchResult(pageOrders, totalAll, totalPages);
     }
 
+    /* ========================= Query build ========================= */
 
-    /* ========================= Query build & date resolve ========================= */
-
-    /** Build query 1 lần gọi POS với from/to đã chuẩn hoá. */
     private Map<String, String> buildQuery(Date from, Date to, int page, int limit) {
         Map<String, String> q = new LinkedHashMap<>();
-        // Nếu cả from & to đều null -> KHÔNG gửi filter ngày
         if (!(from == null && to == null)) {
-            // phòng hờ: nếu một đầu null thì lấy default (min..today)
             if (from == null || to == null) {
                 LocalDate today = LocalDate.now();
                 LocalDate f = (from == null) ? MIN_DATE_FOR_ALL : toLocalDate(from);
@@ -339,13 +391,33 @@ public class NhanhSheetService {
                 to   = java.sql.Date.valueOf(t);
             }
             q.put("fromDate", D_FMT.format(from));
-            q.put("toDate",   D_FMT.format(plusOneDay(to))); // include end date
+            q.put("toDate",   D_FMT.format(plusOneDay(to)));
         }
         q.put("page",  String.valueOf(page));
         q.put("limit", String.valueOf(limit));
         return q;
     }
 
+    // Parse int an toàn: nhận Number hoặc String; null/invalid → trả về def
+    private static int asInt(Object v, int def) {
+        if (v == null) return def;
+        try {
+            if (v instanceof Number n) return n.intValue();
+            String s = String.valueOf(v).trim();
+            if (s.isEmpty()) return def;
+            return Integer.parseInt(s);
+        } catch (Exception ignore) {
+            return def;
+        }
+    }
+
+    // Overload mặc định def = 0
+    private static int asInt(Object v) {
+        return asInt(v, 0);
+    }
+
+
+    /* ========================= Helpers ========================= */
 
     private static Date plusOneDay(Date d) {
         Calendar cal = Calendar.getInstance();
@@ -360,15 +432,13 @@ public class NhanhSheetService {
         return Instant.ofEpochMilli(d.getTime()).atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
-    /* ========================= Helpers ========================= */
-
     private static boolean isBlank(String s) { return s == null || s.isBlank(); }
 
     private static String toDateTimeString(Object createdTime) {
         if (createdTime == null) return null;
         try {
             long v = Long.parseLong(String.valueOf(createdTime));
-            if (String.valueOf(createdTime).length() <= 10) v = v * 1000; // epoch seconds → ms
+            if (String.valueOf(createdTime).length() <= 10) v = v * 1000;
             return LocalDateTime.ofInstant(Instant.ofEpochMilli(v), ZoneId.systemDefault()).format(DT_FMT);
         } catch (Exception ignore) {
             return String.valueOf(createdTime);
@@ -394,7 +464,6 @@ public class NhanhSheetService {
         return "Mới tạo";
     }
 
-    /** Suy luận size từ SKU: lấy phần sau dấu '-' cuối cùng. */
     private static String extractSizeFromSku(String sku) {
         if (isBlank(sku)) return null;
         int i = sku.lastIndexOf('-');
@@ -405,7 +474,6 @@ public class NhanhSheetService {
         return whitelist.contains(up) ? up : cand;
     }
 
-    /* ----- Cast/Utils ----- */
     private static Map<String, Object> asMap(Object o) { return (o instanceof Map) ? (Map<String, Object>) o : new LinkedHashMap<>(); }
     private static Map<String, Object> map(Object o)   { return (o instanceof Map) ? (Map<String, Object>) o : null; }
     private static List<Map<String, Object>> listOfMap(Object o) {
@@ -431,83 +499,20 @@ public class NhanhSheetService {
         try { return (o == null || String.valueOf(o).isBlank()) ? BigDecimal.ZERO : new BigDecimal(String.valueOf(o)); }
         catch (Exception e) { return BigDecimal.ZERO; }
     }
-    @SuppressWarnings("unchecked")
-    private static <T> T fn(Object... arr) { for (Object o : arr) if (o != null) return (T) o; return null; }
+    @SuppressWarnings("unchecked") private static <T> T fn(Object... arr) { for (Object o : arr) if (o != null) return (T) o; return null; }
     private static <T> List<T> uniq(List<T> in) { return in.stream().filter(Objects::nonNull).distinct().collect(Collectors.toList()); }
 
-    /* ========================= Map -> YellowRows ========================= */
+    /* ========================= Window result DTO ========================= */
+    @Getter
+    private static class WindowFetchResult {
+        private final List<Map<String, Object>> pageOrders;
+        private final int totalRecords;
+        private final int totalPages;
 
-    private List<OrderYellowRowDto> mapOrdersToYellowRows(List<Map<String, Object>> orders) {
-        final int[] stt = {1};
-        return orders.stream().flatMap(order -> {
-            Long   idNhanh  = asLong(order.get("id"));
-            String status   = s(fn(order.get("statusName"), order.get("status")));
-            String carrier  = s(fn(order.get("carrierName"), order.get("shippingPartner")));
-            String shipCode = s(fn(order.get("carrierCode"), order.get("shipmentCode")));
-            String phone    = s(fn(order.get("customerMobile"), order.get("customerPhone")));
-            String type     = s(order.get("type"));
-            String created  = toDateTimeString(fn(order.get("createdDateTime"), order.get("createdTime"), order.get("createdAt")));
-
-            Long   codPhaiThu    = asLong(fn(order.get("calcTotalMoney"), order.get("grandTotal"), order.get("total")));
-            String paymentStatus = s(fn(order.get("paymentStatus"), order.get("paidStatus")));
-
-            String paymentMethod = s(fn(order.get("paymentMethod"), order.get("paymentMethodName")));
-            if (isBlank(paymentMethod)) {
-                boolean isDelivery = (carrier != null && !carrier.isBlank())
-                        || (type != null && type.toLowerCase().contains("giao hàng"));
-                paymentMethod = isDelivery ? "COD" : "Tiền mặt";
-            }
-
-            List<Map<String, Object>> items = listOfMap(fn(
-                    order.get("products"), order.get("items"), order.get("orderItems"), Collections.emptyList()
-            ));
-
-            if (items.isEmpty()) {
-                OrderYellowRowDto row = OrderYellowRowDto.builder()
-                        .stt(stt[0]++)
-                        .ngay(created)
-                        .idNhanh(idNhanh)
-                        .soDienThoaiKhach(phone)
-                        .maSanPham(null)
-                        .size(null)
-                        .giaTienBan(null)
-                        .kenhThanhToan(paymentMethod)
-                        .codPhaiThu(codPhaiThu)
-                        .trangThaiThanhToan(paymentStatus)
-                        .donViVanChuyen(carrier)
-                        .maDonHangVanChuyen(shipCode)
-                        .trangThaiTrenNhanh(status)
-                        .build();
-                return java.util.stream.Stream.of(row);
-            }
-
-            final String pm = paymentMethod;
-            return items.stream().map(it -> {
-                String sku   = s(fn(it.get("productCode"), it.get("sku"), it.get("productId")));
-                String size  = s(fn(it.get("size"), it.get("variantName")));
-                if (isBlank(size)) size = extractSizeFromSku(sku);
-                Long   price = asLong(fn(it.get("price"), it.get("sellPrice"), it.get("unitPrice")));
-
-                return OrderYellowRowDto.builder()
-                        .stt(stt[0]++)
-                        .ngay(created)
-                        .idNhanh(idNhanh)
-                        .soDienThoaiKhach(phone)
-                        .maSanPham(sku)
-                        .size(size)
-                        .giaTienBan(price)
-                        .kenhThanhToan(pm)
-                        .codPhaiThu(codPhaiThu)
-                        .trangThaiThanhToan(paymentStatus)
-                        .donViVanChuyen(carrier)
-                        .maDonHangVanChuyen(shipCode)
-                        .trangThaiTrenNhanh(status)
-                        .build();
-            });
-        }).collect(Collectors.toList());
+        private WindowFetchResult(List<Map<String, Object>> pageOrders, int totalRecords, int totalPages) {
+            this.pageOrders = pageOrders == null ? List.of() : pageOrders;
+            this.totalRecords = Math.max(0, totalRecords);
+            this.totalPages = Math.max(0, totalPages);
+        }
     }
-
-    /* ========================= DTOs ========================= */
-
-
 }
