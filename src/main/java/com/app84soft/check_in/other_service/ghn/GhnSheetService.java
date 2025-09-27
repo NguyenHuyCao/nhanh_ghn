@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -28,8 +29,23 @@ public class GhnSheetService {
         }
     }
 
+    /* ===== Simple in-memory cache (TTL) ===== */
+    private static class CacheEntry<V> { final V v; final long exp; CacheEntry(V v,long exp){this.v=v;this.exp=exp;} }
+    private final Map<String, CacheEntry<Page<WhiteRowDto>>> whiteCache = new ConcurrentHashMap<>();
+    private final Map<String, CacheEntry<WhiteRowDto>> detailCache = new ConcurrentHashMap<>();
+    private static final long TTL_MS = 10 * 60 * 1000L; // 10 phút
+
+    private static String cacheKeyWhite(LocalDate from, LocalDate to, int page, int limit) {
+        return "white:" + (from==null?"null":from) + ":" + (to==null?"null":to) + ":" + page + ":" + limit;
+    }
+
     @SuppressWarnings("unchecked")
     public Page<WhiteRowDto> white(LocalDate from, LocalDate to, int page, int limit) {
+        String key = cacheKeyWhite(from, to, page, limit);
+        long now = System.currentTimeMillis();
+        CacheEntry<Page<WhiteRowDto>> hit = whiteCache.get(key);
+        if (hit != null && hit.exp > now) return hit.v;
+
         Map<String, Object> searchBody = new LinkedHashMap<>();
         Map<String, Object> filter = new LinkedHashMap<>();
         if (from != null) filter.put("from_date", from.toString());
@@ -44,11 +60,19 @@ public class GhnSheetService {
 
         List<Map<String, Object>> orders = listOfMap(first(data.get("orders"), data.get("items"), data.get("data")));
         List<WhiteRowDto> out = orders.stream().map(this::mapToWhite).collect(Collectors.toList());
-        return new Page<>(page, limit, total, out);
+        Page<WhiteRowDto> pageObj = new Page<>(page, limit, total, out);
+
+        whiteCache.put(key, new CacheEntry<>(pageObj, now + TTL_MS));
+        return pageObj;
     }
 
-    /** Lấy chi tiết — trả null nếu GHN lỗi/timeout thay vì ném exception */
+    /** Lấy chi tiết — có cache TTL */
     public WhiteRowDto one(String orderCode) {
+        if (orderCode == null || orderCode.isBlank()) return null;
+        long now = System.currentTimeMillis();
+        CacheEntry<WhiteRowDto> d = detailCache.get(orderCode);
+        if (d != null && d.exp > now) return d.v;
+
         return ghn.getOrderDetail(orderCode).map(res -> {
             Map<String, Object> data = map(res.get("data"));
             if (data.isEmpty()) return null;
@@ -65,7 +89,7 @@ public class GhnSheetService {
 
             LocalDateTime deliveredAt = parseTime(first(data.get("finish_date"), data.get("delivered_time"), data.get("updated_date")));
 
-            return WhiteRowDto.builder()
+            WhiteRowDto dto = WhiteRowDto.builder()
                     .orderCode(oc)
                     .clientOrderCode(coc)
                     .deliveredAt(deliveredAt)
@@ -76,6 +100,9 @@ public class GhnSheetService {
                     .bankCollectedAt(null)
                     .bankAmount(null)
                     .build();
+
+            detailCache.put(orderCode, new CacheEntry<>(dto, now + TTL_MS));
+            return dto;
         }).orElse(null);
     }
 
@@ -87,10 +114,9 @@ public class GhnSheetService {
         Long cod = asLong(first(o.get("cod_amount"), o.get("cod_value"), o.get("cod")));
         if (!"Đã giao".equals(status)) cod = 0L;
 
-        // ⭐ Quan trọng: KHÔNG gọi detail khi fee thiếu → gán 0 và đi tiếp
         Long fee = asLong(first(o.get("total_fee"), o.get("fee")));
         if (fee == null) {
-            log.debug("GHN fee is null for {}, keep 0 and skip detail to avoid timeouts", orderCode);
+            log.debug("GHN fee is null for {}, set 0 to avoid detail fanout", orderCode);
             fee = 0L;
         }
 
@@ -109,7 +135,6 @@ public class GhnSheetService {
                 .build();
     }
 
-    /* helpers (giữ nguyên như bạn đang có, chỉ gọn lại) */
     private static String normStatus(String s) {
         if (s == null) return "Mới tạo";
         String x = s.toLowerCase(Locale.ROOT);

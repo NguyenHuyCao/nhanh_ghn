@@ -6,13 +6,14 @@ import com.app84soft.check_in.dto.response.PageResult;
 import com.app84soft.check_in.dto.response.sheet.MergedRowDto;
 import com.app84soft.check_in.other_service.ghn.GhnSheetService;
 import com.app84soft.check_in.other_service.nhanh.NhanhSheetService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.text.Normalizer;
 import java.time.LocalDate;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -22,27 +23,39 @@ public class MergeSheetService {
     private final NhanhSheetService nhanhSheet;
     private final GhnSheetService   ghnSheet;
 
-    /** broaden GHN window to avoid missing late/early deliveries */
     private static final int GHN_FROM_PADDING_DAYS = 7;
     private static final int GHN_TO_PADDING_DAYS   = 14;
 
     public PageResult<MergedRowDto> merge(LocalDate from, LocalDate to, int page, int limit)
             throws com.fasterxml.jackson.core.JsonProcessingException {
 
-        // 1) Page from Nhanh (filtered by created-date in Nhanh)
-        var nhanhPage = nhanhSheet.getYellowPage(
-                from == null ? null : java.sql.Date.valueOf(from),
-                to   == null ? null : java.sql.Date.valueOf(to),
-                page, limit
-        );
-        var nhanhRows = nhanhPage.getItems(); // List<OrderYellowRowDto>
+        ExecutorService es = Executors.newFixedThreadPool(2);
 
-        // 2) GHN white sheet with expanded window (for fast index)
+        // chạy song song
+        CompletableFuture<PageResult<OrderYellowRowDto>> nhanhF = CompletableFuture.supplyAsync(() ->
+        {
+            try {
+                return nhanhSheet.getYellowPage(
+                        from == null ? null : java.sql.Date.valueOf(from),
+                        to   == null ? null : java.sql.Date.valueOf(to),
+                        page, limit
+                );
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        }, es);
+
         LocalDate fG = (from == null) ? null : from.minusDays(GHN_FROM_PADDING_DAYS);
         LocalDate tG = (to   == null) ? null : to.plusDays(GHN_TO_PADDING_DAYS);
-        var ghnPage = ghnSheet.white(fG, tG, 1, Math.max(limit * 5, 500));
 
-        // 3) Index GHN orders (by order_code & client_order_code)
+        CompletableFuture<GhnSheetService.Page<WhiteRowDto>> ghnF = CompletableFuture.supplyAsync(() ->
+                ghnSheet.white(fG, tG, 1, Math.max(limit * 5, 500)), es);
+
+        PageResult<OrderYellowRowDto> nhanhPage = nhanhF.join();
+        GhnSheetService.Page<WhiteRowDto> ghnPage = ghnF.join();
+        es.shutdown();
+
+        // index GHN để join nhanh
         Map<String, WhiteRowDto> byOrderCode  = new HashMap<>();
         Map<String, WhiteRowDto> byClientCode = new HashMap<>();
         for (WhiteRowDto w : ghnPage.items) {
@@ -50,32 +63,36 @@ public class MergeSheetService {
             if (w.getClientOrderCode() != null) byClientCode.putIfAbsent(w.getClientOrderCode(), w);
         }
 
-        // 4) Detail fallback cache
+        // fallback detail (có cache trong GhnSheetService, nên an toàn)
         Map<String, WhiteRowDto> detailCache = new ConcurrentHashMap<>();
 
-        List<MergedRowDto> merged = nhanhRows.stream().map(n -> {
+        List<MergedRowDto> merged = nhanhPage.getItems().stream().map(n -> {
             WhiteRowDto g = null;
 
-            String carrier   = nullToEmpty(n.getDonViVanChuyen());
-            String orderCode = nullToEmpty(n.getMaDonHangVanChuyen());
+            String carrier   = safe(n.getDonViVanChuyen());
+            String orderCode = safe(n.getMaDonHangVanChuyen());
 
-            // detect GHN either by normalized name or code prefix (NVS…)
-            if (isCarrierGHN(carrier, orderCode) && !orderCode.isBlank()) {
-                // fast index
+            if (isCarrierGHN(carrier)) {
+                // 1) match bằng order_code (nếu Nhanh đang lưu trùng)
                 g = byOrderCode.get(orderCode);
+
+                // 2) fallback bằng client_order_code == nhanhOrderId
                 if (g == null && n.getIdNhanh() != null) {
                     g = byClientCode.get(String.valueOf(n.getIdNhanh()));
                 }
-                // detail fallback
-                if (g == null) {
-                    g = detailCache.computeIfAbsent(orderCode, oc -> {
-                        try { return ghnSheet.one(oc); } catch (Exception ignore) { return null; }
-                    });
+
+                // 3) fallback gọi detail (khi có mã; GhnSheetService đã cache + timeout)
+                if (g == null && !orderCode.isBlank()) {
+                    try {
+                        g = detailCache.computeIfAbsent(orderCode, oc -> {
+                            try { return ghnSheet.one(oc); } catch (Exception e) { return null; }
+                        });
+                    } catch (Exception ignore) { /* noop */ }
                 }
             }
 
             return MergedRowDto.builder()
-                    // --- map Nhanh (VI -> EN field names) ---
+                    // Nhanh
                     .seq(n.getStt())
                     .createdAt(n.getNgay())
                     .nhanhOrderId(n.getIdNhanh())
@@ -89,7 +106,7 @@ public class MergeSheetService {
                     .carrier(n.getDonViVanChuyen())
                     .carrierOrderCode(n.getMaDonHangVanChuyen())
                     .nhanhStatus(n.getTrangThaiTrenNhanh())
-                    // --- enrich GHN ---
+                    // GHN
                     .ghnOrderCode(g == null ? null : g.getOrderCode())
                     .ghnClientOrderCode(g == null ? null : g.getClientOrderCode())
                     .ghnDeliveredAt(g == null ? null : g.getDeliveredAt())
@@ -100,7 +117,6 @@ public class MergeSheetService {
                     .build();
         }).collect(Collectors.toList());
 
-        // keep total/page from Nhanh for stable pagination
         return new PageResult<>(
                 nhanhPage.getPage(),
                 nhanhPage.getLimit(),
@@ -110,25 +126,14 @@ public class MergeSheetService {
         );
     }
 
-    /* ================= Helpers ================= */
+    private static String safe(String s) { return s == null ? "" : s; }
 
-    private static String nullToEmpty(String s) { return s == null ? "" : s; }
-
-    /**
-     * GHN detection:
-     * - normalize carrier name (strip accents, lowercase, alnum only) then search for "ghn"/"giaohangnhanh"
-     * - OR check code prefix "NVS"
-     */
-    private static boolean isCarrierGHN(String carrier, String orderCode) {
+    /** nhận diện GHN theo tên hãng (ổn định hơn NVS…) */
+    private static boolean isCarrierGHN(String carrier) {
         if (carrier == null) carrier = "";
         String normalized = Normalizer.normalize(carrier, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}+", "")   // strip accents
-                .toLowerCase()
-                .replaceAll("[^a-z0-9]+", "");
-
-        boolean byName = normalized.contains("ghn") || normalized.contains("giaohangnhanh");
-        boolean byCode = orderCode != null && orderCode.toUpperCase().startsWith("NVS");
-
-        return byName || byCode;
+                .replaceAll("\\p{M}+","")
+                .toLowerCase().replaceAll("[^a-z0-9]+","");
+        return normalized.contains("ghn") || normalized.contains("giaohangnhanh");
     }
 }
