@@ -11,9 +11,6 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDate;
 import java.util.*;
 
-/**
- * Poll dữ liệu mới từ Nhanh/GHN rồi upsert vào DB local.
- */
 @Component
 @ConditionalOnProperty(value = "sheetsync.enabled", havingValue = "true", matchIfMissing = false)
 @RequiredArgsConstructor
@@ -24,9 +21,9 @@ public class SheetSchedulers {
     private final GhnSheetService ghnSheet;
     private final SheetStore store;
 
-    /** Nhanh: quét cửa sổ hôm nay (end-exclusive) */
     @Scheduled(fixedDelayString = "${sheetsync.poll.nhanh-fixed-delay-ms:30000}")
     public void pollNhanh() {
+        long t0 = System.nanoTime();
         try {
             LocalDate now = LocalDate.now();
             Map<String, String> q = new LinkedHashMap<>();
@@ -35,19 +32,20 @@ public class SheetSchedulers {
             q.put("page",     "1");
             q.put("limit",    "100");
 
+            log.info("PollNhanh CALL today window limit=100");
             Map<String, Object> resp = nhanhClient.listOrdersIndex(q);
             Map<String, Object> data = asMap(resp.get("data"));
             List<Map<String, Object>> orders = extractOrders(data);
+            log.info("PollNhanh got {} orders", orders.size());
 
+            int enriched = 0;
             for (Map<String, Object> o : orders) {
                 Long id = asLong(o.get("id"));
                 if (id == null) continue;
 
-                // upsert nhanh_orders + items (theo overload nhận Map order)
                 store.upsertNhanhOrder(o);
                 store.upsertNhanhItems(o);
 
-                // enrich GHN nếu có
                 String carrier = s(o.get("carrierName"));
                 String code    = s(o.get("carrierCode"));
                 boolean isGHN  = (code != null && code.startsWith("NVS"))
@@ -55,36 +53,29 @@ public class SheetSchedulers {
                         || norm(carrier).contains("giaohangnhanh");
                 if (isGHN && code != null) {
                     var w = ghnSheet.one(code);
-                    if (w != null) store.upsertGhnOrderFromWhiteRow(w);
+                    if (w != null) { store.upsertGhnOrderFromWhiteRow(w); enriched++; }
                 }
             }
+            log.info("PollNhanh DONE in {}ms saved={} enrichedGHN={}", ms(t0), orders.size(), enriched);
         } catch (Exception e) {
-            log.warn("pollNhanh failed: {}", e.getMessage());
+            log.warn("pollNhanh failed after {}ms: {}", ms(t0), e.getMessage());
         }
     }
 
-    /** GHN: kéo rộng 48h gần nhất để đảm bảo bắt đủ */
     @Scheduled(fixedDelayString = "${sheetsync.poll.ghn-fixed-delay-ms:30000}")
     public void pollGhn() {
+        long t0 = System.nanoTime();
         try {
             var page = ghnSheet.white(LocalDate.now().minusDays(2), LocalDate.now(), 1, 200);
             page.items.forEach(store::upsertGhnOrderFromWhiteRow);
+            log.info("PollGHN DONE in {}ms upserted={}", ms(t0), page.items.size());
         } catch (Exception e) {
-            log.warn("pollGhn failed: {}", e.getMessage());
+            log.warn("pollGhn failed after {}ms: {}", ms(t0), e.getMessage());
         }
     }
 
-    /* ================= helpers ================= */
-
-    private static Map<String, Object> asMap(Object o) {
-        if (o instanceof Map<?, ?> m) {
-            Map<String, Object> r = new LinkedHashMap<>();
-            m.forEach((k, v) -> r.put(String.valueOf(k), v));
-            return r;
-        }
-        return new LinkedHashMap<>();
-    }
-
+    // helpers giữ nguyên
+    private static Map<String, Object> asMap(Object o) { if (o instanceof Map<?, ?> m) { Map<String, Object> r = new LinkedHashMap<>(); m.forEach((k, v) -> r.put(String.valueOf(k), v)); return r; } return new LinkedHashMap<>(); }
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> extractOrders(Map<String, Object> data) {
         Object ordersObj = data.get("orders") != null ? data.get("orders") : data.get("items");
@@ -93,19 +84,8 @@ public class SheetSchedulers {
         for (Object e : l) if (e instanceof Map<?, ?> m) r.add(asMap(m));
         return r;
     }
-
     private static String s(Object o) { return o == null ? null : String.valueOf(o); }
-
-    private static Long asLong(Object o) {
-        try { return o == null ? null : Long.valueOf(String.valueOf(o)); }
-        catch (Exception e) { return null; }
-    }
-
-    private static String norm(String x) {
-        if (x == null) return "";
-        return java.text.Normalizer.normalize(x, java.text.Normalizer.Form.NFD)
-                .replaceAll("\\p{M}+", "")
-                .toLowerCase()
-                .replaceAll("[^a-z0-9]+", "");
-    }
+    private static Long asLong(Object o) { try { return o == null ? null : Long.valueOf(String.valueOf(o)); } catch (Exception e) { return null; } }
+    private static String norm(String x) { if (x == null) return ""; return java.text.Normalizer.normalize(x, java.text.Normalizer.Form.NFD).replaceAll("\\p{M}+","").toLowerCase().replaceAll("[^a-z0-9]+",""); }
+    private static long ms(long t0){ return Math.round((System.nanoTime()-t0)/1_000_000.0); }
 }

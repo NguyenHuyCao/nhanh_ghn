@@ -41,10 +41,14 @@ public class GhnSheetService {
 
     @SuppressWarnings("unchecked")
     public Page<WhiteRowDto> white(LocalDate from, LocalDate to, int page, int limit) {
+        long t0 = System.nanoTime();
         String key = cacheKeyWhite(from, to, page, limit);
         long now = System.currentTimeMillis();
         CacheEntry<Page<WhiteRowDto>> hit = whiteCache.get(key);
-        if (hit != null && hit.exp > now) return hit.v;
+        if (hit != null && hit.exp > now) {
+            log.info("GHN.white HIT cache from={} to={} page={} limit={} size={}", from, to, page, limit, hit.v.items.size());
+            return hit.v;
+        }
 
         Map<String, Object> searchBody = new LinkedHashMap<>();
         Map<String, Object> filter = new LinkedHashMap<>();
@@ -54,6 +58,7 @@ public class GhnSheetService {
         searchBody.put("limit", limit <= 0 ? 20 : limit);
         searchBody.put("filter", filter);
 
+        log.info("GHN.white CALL from={} to={} page={} limit={}", from, to, page, limit);
         Map<String, Object> res = ghn.listOrders(searchBody);
         Map<String, Object> data = map(res.get("data"));
         int total = asInt(data.get("total"), asInt(data.get("total_orders"), 0));
@@ -63,19 +68,29 @@ public class GhnSheetService {
         Page<WhiteRowDto> pageObj = new Page<>(page, limit, total, out);
 
         whiteCache.put(key, new CacheEntry<>(pageObj, now + TTL_MS));
+        log.info("GHN.white DONE in {}ms code={} total={} items={}",
+                ms(t0), res.get("code"), total, out.size());
         return pageObj;
     }
 
     /** Lấy chi tiết — có cache TTL */
     public WhiteRowDto one(String orderCode) {
         if (orderCode == null || orderCode.isBlank()) return null;
+        long t0 = System.nanoTime();
         long now = System.currentTimeMillis();
         CacheEntry<WhiteRowDto> d = detailCache.get(orderCode);
-        if (d != null && d.exp > now) return d.v;
+        if (d != null && d.exp > now) {
+            log.info("GHN.detail HIT cache order={}", orderCode);
+            return d.v;
+        }
 
+        log.info("GHN.detail CALL order={}", orderCode);
         return ghn.getOrderDetail(orderCode).map(res -> {
             Map<String, Object> data = map(res.get("data"));
-            if (data.isEmpty()) return null;
+            if (data.isEmpty()) {
+                log.warn("GHN.detail EMPTY data order={} code={} msg={}", orderCode, res.get("code"), res.get("message"));
+                return null;
+            }
 
             String oc  = s(data.get("order_code"));
             String coc = s(first(data.get("client_order_code"), data.get("client_code"), data.get("order_client_code")));
@@ -102,8 +117,13 @@ public class GhnSheetService {
                     .build();
 
             detailCache.put(orderCode, new CacheEntry<>(dto, now + TTL_MS));
+            log.info("GHN.detail DONE order={} status={} cod={} fee={} deliveredAt={} in {}ms",
+                    orderCode, status, dto.getCodAmount(), dto.getShipFee(), dto.getDeliveredAt(), ms(t0));
             return dto;
-        }).orElse(null);
+        }).orElseGet(() -> {
+            log.warn("GHN.detail FAILED order={} in {}ms", orderCode, ms(t0));
+            return null;
+        });
     }
 
     private WhiteRowDto mapToWhite(Map<String, Object> o) {
@@ -174,4 +194,5 @@ public class GhnSheetService {
     private static String s(Object o) { return o == null ? null : String.valueOf(o); }
     private static Integer asInt(Object o, int def) { try { return o == null ? def : Integer.parseInt(String.valueOf(o)); } catch (Exception e) { return def; } }
     private static Long asLong(Object o) { try { return o == null ? null : Long.parseLong(String.valueOf(o)); } catch (Exception e) { return null; } }
+    private static long ms(long t0){ return Math.round((System.nanoTime()-t0)/1_000_000.0); }
 }

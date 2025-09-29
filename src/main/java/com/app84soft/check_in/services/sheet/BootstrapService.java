@@ -68,6 +68,11 @@ public class BootstrapService {
         }
     }
 
+    @Async
+    public void refreshLatestAsync(int limit) {
+        bootstrapLatest(limit);
+    }
+
     /** Full sync nền: quét theo cửa sổ 7 ngày gần đây + paging */
     @Async
     public void triggerFullSyncAsync() {

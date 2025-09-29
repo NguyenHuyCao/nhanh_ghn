@@ -10,9 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
-import org.springframework.web.util.UriComponentsBuilder;
 
-import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,39 +22,25 @@ public class NhanhClient {
 
     private final RestTemplate restTemplate;
     private final NhanhProperties prop;
-    private final NhanhAuthService auth; // <-- dùng service lấy token
-
-    private HttpHeaders authHeaders() {
-        String token = auth.getAccessToken();
-        HttpHeaders h = new HttpHeaders();
-        h.setAccept(List.of(MediaType.APPLICATION_JSON));
-        // Nhanh có nơi nhận "Token", có nơi nhận Bearer – đặt cả 2 cho chắc:
-        h.set("Token", token);
-        h.setBearerAuth(token);
-        h.set("x-nhanh-business-id", String.valueOf(prop.getBusinessId()));
-        return h;
-    }
+    private final NhanhAuthService auth;
 
     private String url(String path) {
         String b = prop.getBaseUrl();
-        if (b.endsWith("/"))
-            b = b.substring(0, b.length() - 1);
-        if (!path.startsWith("/"))
-            path = "/" + path;
+        if (b.endsWith("/")) b = b.substring(0, b.length() - 1);
+        if (!path.startsWith("/")) path = "/" + path;
         return b + path;
     }
 
-    // ví dụ triển khai chuẩn cho NhanhClient.listOrdersIndex
     public Map<String, Object> listOrdersIndex(Map<String, String> q) throws JsonProcessingException {
-        String url = trimSlash(prop.getBaseUrl()) + "/api/order/index";
+        long t0 = System.nanoTime();
+        String u = url("/api/order/index");
 
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("fromDate", q.get("fromDate"));
-        data.put("toDate", q.get("toDate"));
-        data.put("page", Integer.parseInt(q.getOrDefault("page", "1")));
-        data.put("limit", Integer.parseInt(q.getOrDefault("limit", "20")));
-        if (q.containsKey("keyword"))
-            data.put("keyword", q.get("keyword"));
+        data.put("toDate",   q.get("toDate"));
+        data.put("page",     Integer.parseInt(q.getOrDefault("page", "1")));
+        data.put("limit",    Integer.parseInt(q.getOrDefault("limit", "20")));
+        if (q.containsKey("keyword")) data.put("keyword", q.get("keyword"));
 
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         form.add("version", "2.0");
@@ -69,13 +53,29 @@ public class NhanhClient {
         h.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
         h.setAccept(List.of(MediaType.APPLICATION_JSON));
 
+        log.info("Nhanh.index CALL fromDate={} toDate={} page={} limit={}",
+                data.get("fromDate"), data.get("toDate"), data.get("page"), data.get("limit"));
+
         ResponseEntity<Map> resp =
-                restTemplate.exchange(url, HttpMethod.POST, new HttpEntity<>(form, h), Map.class);
-        return resp.getBody();
-    }
-    private static String trimSlash(String u){
-        if (u == null) return "";
-        return u.endsWith("/") ? u.substring(0, u.length()-1) : u;
+                restTemplate.exchange(u, HttpMethod.POST, new HttpEntity<>(form, h), Map.class);
+
+        Map<String, Object> body = resp.getBody();
+        int size = 0, total = 0, totalPages = 0;
+        try {
+            Map<String,Object> d = (Map<String,Object>) body.get("data");
+            Object ordersObj = d.get("orders") != null ? d.get("orders") : d.get("items");
+            if (ordersObj instanceof List<?> l) size = l.size();
+            else if (ordersObj instanceof Map<?,?> m) size = m.size();
+            total = asInt(d.get("totalRecords"), 0);
+            totalPages = asInt(d.get("totalPages"), 0);
+        } catch (Exception ignore) {}
+
+        log.info("Nhanh.index DONE in {}ms size={} total={} totalPages={}", ms(t0), size, total, totalPages);
+        return body;
     }
 
+    private static int asInt(Object v, int def) {
+        try { return v == null ? def : Integer.parseInt(String.valueOf(v)); } catch (Exception e) { return def; }
+    }
+    private static long ms(long t0){ return Math.round((System.nanoTime()-t0)/1_000_000.0); }
 }
