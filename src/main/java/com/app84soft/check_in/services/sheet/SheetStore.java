@@ -27,6 +27,10 @@ public class SheetStore {
         if (id == null) return;
 
         LocalDateTime createdAt = toLdt(o.get("createdDateTime"), o.get("createdTime"), o.get("createdAt"));
+        if (createdAt == null) { // ADD: fallback updatedAt
+            createdAt = toLdt(o.get("updatedAt")); // CHANGED
+        }
+
         String phone = s(first(o.get("customerMobile"), o.get("customerPhone")));
         String paymentChannel = s(first(o.get("paymentMethod"), o.get("paymentMethodName")));
         if (isBlank(paymentChannel)) paymentChannel = "COD";
@@ -95,18 +99,39 @@ public class SheetStore {
             for (Object e : l) if (e instanceof Map<?, ?> m) items.add(cast(m));
         }
 
+        // Tổng số lượng toàn đơn (để phân bổ)
+        int totalQty = 0;
+        for (Map<String, Object> it : items) {
+            Object q = first(it.get("quantity"), it.get("qty"), 1);
+            int qi; try { qi = q == null ? 1 : Integer.parseInt(String.valueOf(q)); } catch (Exception ex) { qi = 1; }
+            totalQty += Math.max(0, qi);
+        }
+        if (totalQty == 0) totalQty = 1; // tránh chia 0
+
+        long deposit  = asLong(first(order.get("moneyDeposit")))  == null ? 0L : asLong(order.get("moneyDeposit"));
+        long transfer = asLong(first(order.get("moneyTransfer"))) == null ? 0L : asLong(order.get("moneyTransfer"));
+
         final String SQL = """
-            INSERT INTO nhanh_order_items (order_id, sku, `size`, unit_price, quantity)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO nhanh_order_items (order_id, sku, `size`, unit_price, quantity, discount_total, deposit_alloc, transfer_alloc, revenue_item)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
-              `size`     = VALUES(`size`),
-              unit_price = VALUES(unit_price),
-              quantity   = GREATEST(VALUES(quantity), quantity)
+              `size`         = VALUES(`size`),
+              unit_price     = VALUES(unit_price),
+              quantity       = GREATEST(VALUES(quantity), quantity),
+              discount_total = VALUES(discount_total),
+              deposit_alloc  = VALUES(deposit_alloc),
+              transfer_alloc = VALUES(transfer_alloc),
+              revenue_item   = VALUES(revenue_item)
             """;
 
         int affected = 0;
+
         if (items.isEmpty()) {
-            affected += jdbc.update(SQL, orderId, "_NOITEM_" + orderId, null, null, 1);
+            // vẫn tạo 1 dòng đại diện theo đơn (không có item)
+            long allocDep  = deposit;
+            long allocTran = transfer;
+            long revenue   = 0L;
+            affected += jdbc.update(SQL, orderId, "_NOITEM_" + orderId, null, null, 1, 0L, allocDep, allocTran, revenue);
             log.debug("Store.upsertNhanhItems orderId={} (no items) affected={}", orderId, affected);
             return;
         }
@@ -114,15 +139,27 @@ public class SheetStore {
         for (Map<String, Object> it : items) {
             String sku = s(first(it.get("productCode"), it.get("sku"), it.get("productId")));
             if (isBlank(sku)) sku = "_NOITEM_" + orderId;
+
             String size = s(first(it.get("size"), it.get("variantName")));
             if (isBlank(size)) size = extractSizeFromSku(sku);
-            Long price = asLong(first(it.get("price"), it.get("sellPrice"), it.get("unitPrice")));
 
-            Integer qty;
-            try { Object q = first(it.get("quantity"), it.get("qty"), 1); qty = (q==null)?1:Integer.valueOf(String.valueOf(q)); }
+            Long unitPrice = asLong(first(it.get("price"), it.get("sellPrice"), it.get("unitPrice")));
+            if (unitPrice == null) unitPrice = 0L;
+
+            int qty; try { Object q = first(it.get("quantity"), it.get("qty"), 1); qty = q==null?1:Integer.parseInt(String.valueOf(q)); }
             catch (Exception ignore) { qty = 1; }
 
-            affected += jdbc.update(SQL, orderId, sku, size, price, qty);
+            long discountTotal = asLong(first(it.get("discount"), it.get("lineDiscount"))) == null
+                    ? 0L : asLong(first(it.get("discount"), it.get("lineDiscount")));
+
+            // phân bổ đặt cọc / chuyển khoản theo số lượng
+            long allocDep  = Math.round((deposit  * 1.0 / totalQty) * qty);
+            long allocTran = Math.round((transfer * 1.0 / totalQty) * qty);
+
+            // doanh thu phát sinh theo mã (ngoài sàn): price*qty - discount_total
+            long revenue = unitPrice * Math.max(0, qty) - Math.max(0, discountTotal);
+
+            affected += jdbc.update(SQL, orderId, sku, size, unitPrice, qty, discountTotal, allocDep, allocTran, revenue);
         }
         log.debug("Store.upsertNhanhItems orderId={} items={} affected={}", orderId, items.size(), affected);
     }
@@ -132,26 +169,32 @@ public class SheetStore {
         Long orderId = o.id();
 
         final String SQL = """
-            INSERT INTO nhanh_order_items (order_id, sku, `size`, unit_price, quantity)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO nhanh_order_items (order_id, sku, `size`, unit_price, quantity, discount_total, deposit_alloc, transfer_alloc, revenue_item)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
-              `size`     = VALUES(`size`),
-              unit_price = VALUES(unit_price),
-              quantity   = GREATEST(VALUES(quantity), quantity)
+              `size`         = VALUES(`size`),
+              unit_price     = VALUES(unit_price),
+              quantity       = GREATEST(VALUES(quantity), quantity),
+              discount_total = VALUES(discount_total),
+              deposit_alloc  = VALUES(deposit_alloc),
+              transfer_alloc = VALUES(transfer_alloc),
+              revenue_item   = VALUES(revenue_item)
             """;
 
         int affected = 0;
         if (o.items() == null || o.items().isEmpty()) {
-            affected += jdbc.update(SQL, orderId, "_NOITEM_" + orderId, null, null, 1);
+            affected += jdbc.update(SQL, orderId, "_NOITEM_" + orderId, null, null, 1, 0L, 0L, 0L, 0L);
             log.debug("Store.upsertNhanhItems(dto) orderId={} (no items) affected={}", orderId, affected);
             return;
         }
 
+        // Không có discount/deposit/transfer trong DTO đơn giản -> để 0
         for (var it : o.items()) {
             String sku = (it.sku() == null || it.sku().isBlank()) ? "_NOITEM_" + orderId : it.sku();
             String size = isBlank(it.size()) ? extractSizeFromSku(sku) : it.size();
             int qty = it.quantity() == null ? 1 : it.quantity();
-            affected += jdbc.update(SQL, orderId, sku, size, it.unitPrice(), qty);
+            long unitPrice = it.unitPrice() == null ? 0L : it.unitPrice();
+            affected += jdbc.update(SQL, orderId, sku, size, unitPrice, qty, 0L, 0L, 0L, unitPrice * Math.max(0, qty));
         }
         log.debug("Store.upsertNhanhItems(dto) orderId={} items={} affected={}", orderId, o.items().size(), affected);
     }
@@ -160,22 +203,26 @@ public class SheetStore {
 
     public void upsertGhnOrder(ExternalGhnClient.GhnOrder go) {
         if (go == null) return;
+        int isPr = isPrCode(go.orderCode()) ? 1 : 0;
+
         int rows = jdbc.update("""
-            INSERT INTO ghn_orders
-              (order_code, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
-               bank_collected_at, bank_amount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              client_order_code = VALUES(client_order_code),
-              delivered_at      = VALUES(delivered_at),
-              ship_fee          = VALUES(ship_fee),
-              cod_amount        = VALUES(cod_amount),
-              ship_status       = VALUES(ship_status),
-              return_note       = VALUES(return_note),
-              bank_collected_at = VALUES(bank_collected_at),
-              bank_amount       = VALUES(bank_amount)
-            """,
+        INSERT INTO ghn_orders
+          (order_code, is_pr, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
+           bank_collected_at, bank_amount)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          is_pr             = VALUES(is_pr),
+          client_order_code = VALUES(client_order_code),
+          delivered_at      = VALUES(delivered_at),
+          ship_fee          = VALUES(ship_fee),
+          cod_amount        = VALUES(cod_amount),
+          ship_status       = VALUES(ship_status),
+          return_note       = VALUES(return_note),
+          bank_collected_at = VALUES(bank_collected_at),
+          bank_amount       = VALUES(bank_amount)
+        """,
                 go.orderCode(),
+                isPr,
                 go.clientOrderCode(),
                 go.deliveredAt() == null ? null : Timestamp.valueOf(go.deliveredAt()),
                 go.shipFee(),
@@ -187,24 +234,33 @@ public class SheetStore {
         log.debug("Store.upsertGhnOrder code={} affected={}", go.orderCode(), rows);
     }
 
+    private static boolean isPrCode(String code) {
+        return code != null && code.toUpperCase(Locale.ROOT).startsWith("PR");
+    }
+
+
     public void upsertGhnOrderFromWhiteRow(WhiteRowDto w) {
         if (w == null) return;
+        int isPr = isPrCode(w.getOrderCode()) ? 1 : 0;
+
         int rows = jdbc.update("""
-            INSERT INTO ghn_orders
-              (order_code, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
-               bank_collected_at, bank_amount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              client_order_code = VALUES(client_order_code),
-              delivered_at      = VALUES(delivered_at),
-              ship_fee          = VALUES(ship_fee),
-              cod_amount        = VALUES(cod_amount),
-              ship_status       = VALUES(ship_status),
-              return_note       = VALUES(return_note),
-              bank_collected_at = VALUES(bank_collected_at),
-              bank_amount       = VALUES(bank_amount)
-            """,
+        INSERT INTO ghn_orders
+          (order_code, is_pr, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
+           bank_collected_at, bank_amount)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          is_pr             = VALUES(is_pr),
+          client_order_code = VALUES(client_order_code),
+          delivered_at      = VALUES(delivered_at),
+          ship_fee          = VALUES(ship_fee),
+          cod_amount        = VALUES(cod_amount),
+          ship_status       = VALUES(ship_status),
+          return_note       = VALUES(return_note),
+          bank_collected_at = VALUES(bank_collected_at),
+          bank_amount       = VALUES(bank_amount)
+        """,
                 w.getOrderCode(),
+                isPr,
                 w.getClientOrderCode(),
                 w.getDeliveredAt() == null ? null : Timestamp.valueOf(w.getDeliveredAt()),
                 w.getShipFee(),
@@ -215,6 +271,7 @@ public class SheetStore {
         );
         log.debug("Store.upsertGhnOrder(white) code={} affected={}", w.getOrderCode(), rows);
     }
+
 
     /* ===================== helpers ===================== */
     private static Map<String, Object> cast(Map<?, ?> m) {

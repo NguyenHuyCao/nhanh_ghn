@@ -41,7 +41,8 @@ public class GhnClient {
 
     /* ================== Public APIs ================== */
 
-    private HttpHeaders authHeadersTokenOnly() {
+    // ADD: header chỉ có Token (dùng cho /v2/shop/all)
+    private HttpHeaders authHeadersTokenOnly() { // ADD
         HttpHeaders h = new HttpHeaders();
         h.setAccept(List.of(MediaType.APPLICATION_JSON));
         h.setContentType(MediaType.APPLICATION_JSON);
@@ -49,16 +50,19 @@ public class GhnClient {
         return h;
     }
 
-    /** Tìm kiếm đơn GHN theo ngày, trang, limit, trạng thái. */
-    public Map<String, Object> searchOrders(LocalDate from, LocalDate to, int page, int limit, String status) {
+    /**
+     * @deprecated không còn dùng trong flow; để tránh hỏng code cũ, vẫn giữ lại nhưng chuyển qua multi-shop.
+     */
+    @Deprecated // CHANGED: đánh dấu không dùng
+    public Map<String, Object> searchOrders(LocalDate from, LocalDate to, int page, int limit, String status) { // CHANGED
         String url = base("/v2/shipping-order/search");
 
         Map<String, Object> filter = new LinkedHashMap<>();
         if (from != null) filter.put("from_date", from.toString());
         if (to   != null) filter.put("to_date",   to.toString());
         if (status != null && !status.isBlank()) filter.put("status", status);
-        // có thể lọc theo shop mặc định
-        filter.put("shop_ids", List.of(props.getShopId()));
+        // CHANGED: thay vì 1 shop mặc định -> tất cả shop thuộc token
+        filter.put("shop_ids", getAllShopIds());
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("page",  page  <= 0 ? 1  : page);
@@ -67,13 +71,13 @@ public class GhnClient {
 
         long t0 = System.nanoTime();
         Map<String, Object> rs = post(url, body).orElseGet(Map::of);
-        log.info("GHN.searchOrders from={} to={} page={} limit={} status={} done in {}ms, code={}",
+        log.info("GHN.searchOrders(from={} to={} page={} limit={} status={}) in {}ms code={}",
                 from, to, page, limit, status, ms(t0), rs.get("code"));
         return rs;
     }
 
     /** Search với body tuỳ biến. */
-    public Map<String, Object> listOrders(Map<String, Object> body) {
+    public Map<String, Object> listOrders(Map<String, Object> body) { // CHANGED
         String url = base("/v2/shipping-order/search");
         @SuppressWarnings("unchecked")
         Map<String, Object> filter = (Map<String, Object>) body.get("filter");
@@ -83,7 +87,7 @@ public class GhnClient {
         }
         // Nếu caller KHÔNG chỉ định shop_ids -> tự gắn tất cả shop của token
         if (!filter.containsKey("shop_ids")) {
-            filter.put("shop_ids", getAllShopIds());
+            filter.put("shop_ids", getAllShopIds()); // CHANGED
         }
 
         int page  = asInt(body.get("page"), 1);
@@ -94,8 +98,6 @@ public class GhnClient {
         log.info("GHN.listOrders done in {}ms, code={}", ms(t0), rs.get("code"));
         return rs;
     }
-
-
 
     /**
      * Lấy chi tiết đơn GHN theo orderCode.
@@ -170,11 +172,11 @@ public class GhnClient {
     }
 
     /** Danh sách shop (để kiểm tra nhanh token). */
-    public Map<String, Object> getShops() {
+    public Map<String, Object> getShops() { // CHANGED: dùng token-only
         String url = base("/v2/shop/all");
         try {
             ResponseEntity<Map> res =
-                    restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(authHeaders()), Map.class);
+                    restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(authHeadersTokenOnly()), Map.class); // CHANGED
             return res.getBody() == null ? Map.of() : res.getBody();
         } catch (RestClientException ex) {
             log.warn("GHN.getShops failed: {}", ex.getMessage());
@@ -224,16 +226,11 @@ public class GhnClient {
 
     /* ================== Helpers ================== */
 
-    /**
-     * POST mặc định: header lấy từ cấu hình (Token + ShopId mặc định).
-     * Có retry nhẹ cho lỗi tạm (timeout/5xx).
-     */
     @SuppressWarnings("unchecked")
     private Optional<Map<String, Object>> post(String url, Object body) {
         return doPost(url, body, props.getShopId());
     }
 
-    /** POST nhưng ép ShopId cụ thể (dùng khi dò shop). */
     @SuppressWarnings("unchecked")
     private Optional<Map<String, Object>> post(String url, Object body, Long shopId) {
         return doPost(url, body, shopId);
@@ -299,8 +296,7 @@ public class GhnClient {
     }
 
     /** Lấy toàn bộ shopId từ `/v2/shop/all` và cache 10 phút. */
-    // !!! ĐỔI access modifier thành public để các service khác có thể dùng (nếu cần)
-    public List<Long> getAllShopIds() {
+    public List<Long> getAllShopIds() { // CHANGED: public + token-only
         long now = System.currentTimeMillis();
         if (now < shopListExpireAt && !cachedShopIds.isEmpty()) {
             log.debug("GHN.shops cache HIT: {}", cachedShopIds);
@@ -309,10 +305,9 @@ public class GhnClient {
 
         List<Long> ids = new ArrayList<>();
         try {
-            // ⚠️ Quan trọng: gọi /v2/shop/all với Token-only, KHÔNG gắn ShopId
             ResponseEntity<Map> res =
                     restTemplate.exchange(base("/v2/shop/all"), HttpMethod.GET,
-                            new HttpEntity<>(authHeadersTokenOnly()), Map.class);
+                            new HttpEntity<>(authHeadersTokenOnly()), Map.class); // CHANGED
 
             Map<String, Object> body = res.getBody();
             if (body != null && body.get("data") instanceof Map<?, ?> data) {
@@ -338,7 +333,6 @@ public class GhnClient {
         log.info("GHN.shops cached (ALL): {}", ids);
         return ids;
     }
-
 
     /** Ghép base-url + path. */
     private String base(String path) {

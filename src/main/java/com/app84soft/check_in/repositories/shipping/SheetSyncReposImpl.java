@@ -95,6 +95,10 @@ public class SheetSyncReposImpl implements SheetSyncRepos {
   @Override
   public void upsertGhnOrder(Map<String, Object> m) {
     String orderCode = s(m.get("order_code"));
+    if (orderCode != null && orderCode.endsWith("_PR")) {
+      log.debug("Skip GHN _PR {}", orderCode);
+      return;
+    }
     String clientOrderCode = s(first(m.get("client_order_code"), m.get("client_code")));
     LocalDateTime deliveredAt = toLdt(first(m.get("delivered_at"), m.get("finish_time")));
     Long shipFee = asLong(first(m.get("fee"), m.get("ship_fee")));
@@ -105,9 +109,9 @@ public class SheetSyncReposImpl implements SheetSyncRepos {
     jdbc.update(
         """
             INSERT INTO ghn_orders
-              (order_code, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
+              (order_code, is_pr, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
                bank_collected_at, bank_amount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            VALUES (?, 0, ?, ?, ?, ?, ?, ?, NULL, NULL)
             ON DUPLICATE KEY UPDATE
               client_order_code = VALUES(client_order_code),
               delivered_at      = VALUES(delivered_at),

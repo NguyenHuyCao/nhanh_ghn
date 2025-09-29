@@ -37,7 +37,7 @@ WHERE a.id_keep IS NULL;
 
 DROP TEMPORARY TABLE IF EXISTS _noi_agg;
 
--- 3) BỎ UNIQUE CŨ nếu có
+-- V7 3) BỎ UNIQUE CŨ nếu có
 SET @has := (SELECT COUNT(*) FROM information_schema.STATISTICS
              WHERE TABLE_SCHEMA = DATABASE()
                AND TABLE_NAME='nhanh_order_items'

@@ -1,3 +1,5 @@
+-- V5
+
 CREATE TABLE IF NOT EXISTS sync_state (
                                           source          VARCHAR(32) NOT NULL PRIMARY KEY,   -- 'nhanh' | 'ghn'
     last_created_at DATETIME NULL,

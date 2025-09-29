@@ -19,13 +19,15 @@ public class GhnBackfillService {
     /** Backfill n mã GHN chưa có trong ghn_orders */
     public int backfillMissing(int batch) {
         List<String> codes = jdbc.queryForList("""
-            SELECT o.carrier_code
-            FROM nhanh_orders o
-            LEFT JOIN ghn_orders go ON go.order_code = o.carrier_code
-            WHERE o.carrier_code LIKE 'NVS%%' AND go.order_code IS NULL
-            ORDER BY o.created_at DESC
-            LIMIT ?
-        """, String.class, batch);
+                    SELECT o.carrier_code
+                    FROM nhanh_orders o
+                    LEFT JOIN ghn_orders go ON go.order_code = o.carrier_code
+                    WHERE o.carrier_code LIKE 'NVS%%'
+                      AND o.carrier_code NOT LIKE '%%_PR'
+                      AND (go.order_code IS NULL)
+                    ORDER BY o.created_at DESC
+                    LIMIT ?
+                """, String.class, batch);
 
         int ok = 0;
         for (String code : codes) {

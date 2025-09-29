@@ -46,9 +46,9 @@ public class BootstrapService {
 
                 // upsert nhanh_orders + nhanh_order_items
                 store.upsertNhanhOrder(o);
-                store.upsertNhanhItems(o); // <-- CHỈ 1 tham số (Map order)
+                store.upsertNhanhItems(o); // giữ 1 tham số Map
 
-                // nếu GHN thì enrich (dùng order code NVS…)
+                // enrich GHN nếu là GHN
                 String carrier = s(o.get("carrierName"));
                 String code    = s(o.get("carrierCode"));
                 boolean isGHN  = (code != null && code.startsWith("NVS"))
@@ -99,7 +99,7 @@ public class BootstrapService {
                     if (nhanhId == null) continue;
 
                     store.upsertNhanhOrder(o);
-                    store.upsertNhanhItems(o); // <-- 1 tham số (Map order)
+                    store.upsertNhanhItems(o);
 
                     String carrier = s(o.get("carrierName"));
                     String code    = s(o.get("carrierCode"));
