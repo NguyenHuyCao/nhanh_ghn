@@ -20,22 +20,22 @@ public class SheetMergeController {
 
     private final MergeSheetService service;
 
-    @GetMapping("/merge")
-    @Operation(summary = "Merged sheet (Nhanh + GHN) — English fields")
-    public ResponseEntity<?> merge(
-            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate from,
-            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate to,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "20") int limit
-    ) throws com.fasterxml.jackson.core.JsonProcessingException {
-
-        PageResult<MergedRowDto> pr = service.merge(from, to, page, limit);
-
-        Map<String,Object> data = new LinkedHashMap<>();
-        data.put("total", pr.getTotal());
-        data.put("page", pr.getPage());
-        data.put("items", pr.getItems()); // items already in English
-
-        return ResponseEntity.ok(Map.of("code", 200, "data", data));
-    }
+//    @GetMapping("/merge")
+//    @Operation(summary = "Merged sheet (Nhanh + GHN) — English fields")
+//    public ResponseEntity<?> merge(
+//            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate from,
+//            @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate to,
+//            @RequestParam(defaultValue = "1") int page,
+//            @RequestParam(defaultValue = "20") int limit
+//    ) throws com.fasterxml.jackson.core.JsonProcessingException {
+//
+//        PageResult<MergedRowDto> pr = service.merge(from, to, page, limit);
+//
+//        Map<String,Object> data = new LinkedHashMap<>();
+//        data.put("total", pr.getTotal());
+//        data.put("page", pr.getPage());
+//        data.put("items", pr.getItems()); // items already in English
+//
+//        return ResponseEntity.ok(Map.of("code", 200, "data", data));
+//    }
 }

@@ -10,9 +10,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 
-
 @Configuration
-public class FileStorageConfig  {
+public class FileStorageConfig {
     @Value("${file.storage-type}")
     private String storageType;
 
@@ -27,6 +26,14 @@ public class FileStorageConfig  {
         StorageType type = StorageType.getType(storageType);
         String directory = environment.getProperty("file.upload-dir");
         String serverUrl = environment.getProperty("system.backend.url");
+
+        if (serverUrl == null) {
+            serverUrl = "/";
+        } else if (!serverUrl.endsWith("/")) {
+            serverUrl = serverUrl + "/";
+        }
+
+        // Hiện tại chỉ dùng StorageLocal; nếu sau này có S3/GCS thì switch theo 'type'
         return new StorageLocal(new StorageNfsConfig(directory, serverUrl));
     }
 }

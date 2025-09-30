@@ -1,6 +1,5 @@
 package com.app84soft.check_in.security;
 
-
 import lombok.Getter;
 import lombok.Setter;
 
@@ -12,7 +11,7 @@ public class SecurityContexts {
 
     private Object data;
 
-    public static SecurityContexts getContext(){
+    public static SecurityContexts getContext() {
         return context.get();
     }
 
@@ -22,4 +21,8 @@ public class SecurityContexts {
         SecurityContexts.context.get().setData(data);
     }
 
+    /** Xoá sạch context hiện tại (dùng ở filter finally) */
+    public static void clear() {
+        context.remove();
+    }
 }

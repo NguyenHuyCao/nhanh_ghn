@@ -17,17 +17,15 @@ public class StorageLocal implements StorageResource {
     private final StorageNfsConfig config;
 
     public StorageLocal(StorageConfig config) {
-        this.config = (StorageNfsConfig)config;
+        this.config = (StorageNfsConfig) config;
     }
 
     @Override
     public InputStream readResource(String path) {
         path = fixPath(path);
         String src = String.format("%s/%s", config.getDirectory(), path);
-        InputStream in;
         try {
-            in = new FileInputStream(src);
-            return in;
+            return new FileInputStream(src);
         } catch (FileNotFoundException e) {
             log.error("File not found : {}", path);
             throw new BusinessException("File not found!", HttpStatus.NOT_FOUND);
@@ -40,9 +38,15 @@ public class StorageLocal implements StorageResource {
         String src = String.format("%s/%s", config.getDirectory(), path);
         File file = new File(src);
         try {
+            File parent = file.getParentFile();
+            if (parent != null && !parent.exists()) {
+                if (!parent.mkdirs() && !parent.exists()) {
+                    throw new IOException("Cannot create directory: " + parent);
+                }
+            }
             FileUtils.copyInputStreamToFile(inputStream, file);
         } catch (IOException e) {
-            log.error("Write file error : {}", src);
+            log.error("Write file error : {}", src, e);
             throw new BusinessException("Write file error", HttpStatus.INTERNAL_SERVER_ERROR);
         }
         return String.format("%s%s", config.getServerUrl(), path);
@@ -53,8 +57,7 @@ public class StorageLocal implements StorageResource {
         file = fixPath(file);
         String src = String.format("%s/%s", config.getDirectory(), file);
         try {
-            Path path;
-            path = Paths.get(src);
+            Path path = Paths.get(src);
             Files.deleteIfExists(path);
         } catch (IOException e) {
             log.info("Can not remove temporary files");
@@ -65,10 +68,12 @@ public class StorageLocal implements StorageResource {
 
     @Override
     public String getUrl(String file) {
-        return config.getServerUrl() + file;
+        return config.getServerUrl() + fixPath(file);
     }
 
     private String fixPath(String path) {
+        if (path == null)
+            return "";
         if (path.startsWith("/")) {
             path = path.substring(1);
         }

@@ -12,13 +12,12 @@ import java.io.IOException;
 @Component
 public class SecurityContextCleanupFilter extends OncePerRequestFilter {
     @Override
-    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
-            throws ServletException, IOException {
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res,
+            FilterChain chain) throws ServletException, IOException {
         try {
             chain.doFilter(req, res);
         } finally {
-            SecurityContexts.getContext();
-            SecurityContexts.newContext(null);
+            SecurityContexts.clear();
         }
     }
 }

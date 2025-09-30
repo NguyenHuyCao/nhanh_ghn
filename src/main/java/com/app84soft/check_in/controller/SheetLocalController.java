@@ -3,6 +3,7 @@ package com.app84soft.check_in.controller;
 import com.app84soft.check_in.services.sheet.BootstrapService;
 import com.app84soft.check_in.services.sheet.GhnBackfillService;
 import com.app84soft.check_in.services.sheet.LocalSheetQueryService;
+import io.swagger.v3.oas.annotations.Operation;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
@@ -21,15 +22,15 @@ public class SheetLocalController {
     private final LocalSheetQueryService localQuery;
     private final GhnBackfillService backfill;
 
-    /** 1) Lưu trước N đơn mới nhất (từ Nhanh + enrich GHN) */
     @PostMapping("/bootstrap")
+    @Operation(summary = "Lưu trước N đơn mới nhất (từ Nhanh + enrich GHN)")
     public ResponseEntity<?> bootstrap(@RequestParam(defaultValue = "30") int limit) {
         int saved = bootstrap.bootstrapLatest(limit);
         return ResponseEntity.ok(Map.of("code", 200, "message", "bootstrapped", "saved", saved));
     }
 
-    /** 2) Lấy dữ liệu từ DB (merge Nhanh + GHN) */
     @GetMapping("/local")
+    @Operation(summary = "Lấy dữ liệu từ DB (merge Nhanh + GHN)")
     public ResponseEntity<?> queryLocal(
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate from,
             @RequestParam(required = false) @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate to,
@@ -52,15 +53,15 @@ public class SheetLocalController {
         return ResponseEntity.ok(Map.of("code", 200, "data", data));
     }
 
-    /** 3) Backfill GHN (lấp dữ liệu GHN còn thiếu cho các đơn Nhanh đã có) */
     @PostMapping("/ghn/backfill")
+    @Operation(summary = "Backfill GHN (lấp dữ liệu GHN còn thiếu cho các đơn Nhanh đã có)")
     public ResponseEntity<?> backfill(@RequestParam(defaultValue = "200") int batch) {
         int ok = backfill.backfillMissing(batch);
         return ResponseEntity.ok(Map.of("code", 200, "filled", ok));
     }
 
-    /** 4) Gọi full-sync thủ công (không chờ trả về hết) */
     @PostMapping("/sync/trigger")
+    @Operation(summary = "Gọi full-sync thủ công (không chờ trả về hết)")
     public ResponseEntity<?> triggerSync() {
         bootstrap.triggerFullSyncAsync();
         return ResponseEntity.ok(Map.of("code", 200, "message", "sync_started"));

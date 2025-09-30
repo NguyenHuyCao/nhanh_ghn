@@ -11,11 +11,6 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.util.*;
 
-/**
- * Lấy dữ liệu từ POS Nhanh (index) rồi lưu vào DB cục bộ.
- * - bootstrapLatest: lấy page=1, limit=N mới nhất
- * - triggerFullSyncAsync: full-sync theo cửa sổ ngày gần đây
- */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -23,11 +18,11 @@ public class BootstrapService {
 
     private final NhanhClient nhanhClient;
     private final GhnSheetService ghnSheet;
-    private final SheetStore store; // JdbcTemplate-based
+    private final SheetStore store;
 
     private final ObjectMapper om = new ObjectMapper();
 
-    /** Lấy page=1, limit=N từ Nhanh (không filter ngày) → upsert DB, enrich GHN nếu cần */
+    /** Lấy page=1, limit=N mới nhất từ Nhanh → upsert DB, enrich GHN “có kiểm soát” */
     public int bootstrapLatest(int limit) {
         try {
             Map<String, String> q = new LinkedHashMap<>();
@@ -44,11 +39,9 @@ public class BootstrapService {
                 Long nhanhId = asLong(o.get("id"));
                 if (nhanhId == null) continue;
 
-                // upsert nhanh_orders + nhanh_order_items
                 store.upsertNhanhOrder(o);
-                store.upsertNhanhItems(o); // giữ 1 tham số Map
+                store.upsertNhanhItems(o);
 
-                // enrich GHN nếu là GHN
                 String carrier = s(o.get("carrierName"));
                 String code    = s(o.get("carrierCode"));
                 boolean isGHN  = (code != null && code.startsWith("NVS"))
@@ -56,8 +49,11 @@ public class BootstrapService {
                         || normalize(carrier).contains("giaohangnhanh");
 
                 if (isGHN && code != null) {
-                    var w = ghnSheet.one(code);
-                    if (w != null) store.upsertGhnOrderFromWhiteRow(w);
+                    // chỉ gọi GHN nếu chưa final và đã quá TTL 15'
+                    if (!store.isGhnFinal(code) && store.shouldRefreshGhn(code, 15)) {
+                        var w = ghnSheet.one(code);
+                        if (w != null) store.upsertGhnOrderFromWhiteRow(w);
+                    }
                 }
                 saved++;
             }
@@ -73,7 +69,7 @@ public class BootstrapService {
         bootstrapLatest(limit);
     }
 
-    /** Full sync nền: quét theo cửa sổ 7 ngày gần đây + paging */
+    /** Full sync nền: quét theo cửa sổ 7 ngày gần đây + paging, enrich GHN có gate */
     @Async
     public void triggerFullSyncAsync() {
         LocalDate to = LocalDate.now();
@@ -85,7 +81,7 @@ public class BootstrapService {
             try {
                 Map<String, String> q = new LinkedHashMap<>();
                 q.put("fromDate", from.toString());
-                q.put("toDate",   to.plusDays(1).toString()); // end-exclusive
+                q.put("toDate",   to.plusDays(1).toString());
                 q.put("page", String.valueOf(page));
                 q.put("limit", String.valueOf(per));
 
@@ -108,8 +104,10 @@ public class BootstrapService {
                             || normalize(carrier).contains("giaohangnhanh");
 
                     if (isGHN && code != null) {
-                        var w = ghnSheet.one(code);
-                        if (w != null) store.upsertGhnOrderFromWhiteRow(w);
+                        if (!store.isGhnFinal(code) && store.shouldRefreshGhn(code, 15)) {
+                            var w = ghnSheet.one(code);
+                            if (w != null) store.upsertGhnOrderFromWhiteRow(w);
+                        }
                     }
                 }
                 if (chunk.size() < per) break;
@@ -121,8 +119,7 @@ public class BootstrapService {
         }
     }
 
-    /* ================= helpers ================= */
-
+    /* helpers giữ nguyên */
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> extractOrders(Map<String, Object> data) {
         Object ordersObj = data.get("orders") != null ? data.get("orders") : data.get("items");
@@ -134,29 +131,12 @@ public class BootstrapService {
         }
         return out;
     }
-
-    private static Map<String, Object> asMap(Object o) {
-        if (o instanceof Map<?, ?> m) {
-            Map<String, Object> r = new LinkedHashMap<>();
-            m.forEach((k, v) -> r.put(String.valueOf(k), v));
-            return r;
-        }
-        return new LinkedHashMap<>();
-    }
-
+    private static Map<String, Object> asMap(Object o) { if (o instanceof Map<?, ?> m) { Map<String, Object> r = new LinkedHashMap<>(); m.forEach((k, v) -> r.put(String.valueOf(k), v)); return r; } return new LinkedHashMap<>(); }
     private static String s(Object o) { return o == null ? null : String.valueOf(o); }
-
-    private static Long asLong(Object o) {
-        try { return o == null ? null : Long.valueOf(String.valueOf(o)); }
-        catch (Exception e) { return null; }
-    }
-
+    private static Long asLong(Object o) { try { return o == null ? null : Long.valueOf(String.valueOf(o)); } catch (Exception e) { return null; } }
     private static String normalize(String x) {
         if (x == null) return "";
-        String n = java.text.Normalizer.normalize(x, java.text.Normalizer.Form.NFD)
-                .replaceAll("\\p{M}+", "")
-                .toLowerCase()
-                .replaceAll("[^a-z0-9]+", "");
-        return n;
+        return java.text.Normalizer.normalize(x, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+","").toLowerCase().replaceAll("[^a-z0-9]+","");
     }
 }

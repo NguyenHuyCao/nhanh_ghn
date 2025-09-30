@@ -52,8 +52,10 @@ public class SheetSchedulers {
                         || norm(carrier).contains("ghn")
                         || norm(carrier).contains("giaohangnhanh");
                 if (isGHN && code != null) {
-                    var w = ghnSheet.one(code);
-                    if (w != null) { store.upsertGhnOrderFromWhiteRow(w); enriched++; }
+                    if (!store.isGhnFinal(code) && store.shouldRefreshGhn(code, 15)) {
+                        var w = ghnSheet.one(code);
+                        if (w != null) { store.upsertGhnOrderFromWhiteRow(w); enriched++; }
+                    }
                 }
             }
             log.info("PollNhanh DONE in {}ms saved={} enrichedGHN={}", ms(t0), orders.size(), enriched);
@@ -74,7 +76,7 @@ public class SheetSchedulers {
         }
     }
 
-    // helpers giữ nguyên
+    // helpers
     private static Map<String, Object> asMap(Object o) { if (o instanceof Map<?, ?> m) { Map<String, Object> r = new LinkedHashMap<>(); m.forEach((k, v) -> r.put(String.valueOf(k), v)); return r; } return new LinkedHashMap<>(); }
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> extractOrders(Map<String, Object> data) {

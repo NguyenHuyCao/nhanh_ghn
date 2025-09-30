@@ -18,6 +18,31 @@ import java.util.*;
 public class SheetStore {
     private final JdbcTemplate jdbc;
 
+    /* ===================== GATE CHO GHN (MỚI) ===================== */
+
+    /** Đơn GHN đã “final” (Đã giao/Đã hoàn hoặc có delivered_at) thì khỏi refresh nữa */
+    public boolean isGhnFinal(String orderCode) {
+        if (orderCode == null || orderCode.isBlank()) return false;
+        Integer n = jdbc.queryForObject("""
+            SELECT COUNT(*) FROM ghn_orders 
+            WHERE order_code = ? 
+              AND (ship_status IN ('Đã giao','Đã hoàn') OR delivered_at IS NOT NULL)
+        """, Integer.class, orderCode);
+        return n != null && n > 0;
+    }
+
+    /** Cho phép refresh nếu đơn chưa final và đã quá TTL phút kể từ lần cập nhật gần nhất */
+    public boolean shouldRefreshGhn(String orderCode, int minutesTtl) {
+        if (orderCode == null || orderCode.isBlank()) return false;
+        Integer n = jdbc.queryForObject("""
+            SELECT COUNT(*) FROM ghn_orders 
+            WHERE order_code = ?
+              AND (ship_status NOT IN ('Đã giao','Đã hoàn') OR ship_status IS NULL)
+              AND (updated_ts IS NULL OR updated_ts < NOW() - INTERVAL ? MINUTE)
+        """, Integer.class, orderCode, Math.max(1, minutesTtl));
+        return n != null && n > 0;
+    }
+
     /* ===================== Nhanh: ORDER ===================== */
 
     /** Upsert theo Map (luồng NhanhClient.listOrdersIndex) */
@@ -27,8 +52,8 @@ public class SheetStore {
         if (id == null) return;
 
         LocalDateTime createdAt = toLdt(o.get("createdDateTime"), o.get("createdTime"), o.get("createdAt"));
-        if (createdAt == null) { // ADD: fallback updatedAt
-            createdAt = toLdt(o.get("updatedAt")); // CHANGED
+        if (createdAt == null) { // fallback updatedAt nếu API chỉ có updatedAt
+            createdAt = toLdt(o.get("updatedAt"));
         }
 
         String phone = s(first(o.get("customerMobile"), o.get("customerPhone")));
@@ -51,7 +76,7 @@ public class SheetStore {
               carrier         = VALUES(carrier),
               carrier_code    = VALUES(carrier_code),
               status          = VALUES(status)
-            """,
+        """,
                 id,
                 createdAt == null ? null : Timestamp.valueOf(createdAt),
                 phone, paymentChannel, codToCollect, carrier, carrierCode, status
@@ -76,7 +101,7 @@ public class SheetStore {
               carrier         = VALUES(carrier),
               carrier_code    = VALUES(carrier_code),
               status          = VALUES(status)
-            """,
+        """,
                 o.id(),
                 o.createdAt() == null ? null : Timestamp.valueOf(o.createdAt()),
                 o.customerPhone(), paymentChannel, o.codToCollect(),
@@ -122,7 +147,7 @@ public class SheetStore {
               deposit_alloc  = VALUES(deposit_alloc),
               transfer_alloc = VALUES(transfer_alloc),
               revenue_item   = VALUES(revenue_item)
-            """;
+        """;
 
         int affected = 0;
 
@@ -179,7 +204,7 @@ public class SheetStore {
               deposit_alloc  = VALUES(deposit_alloc),
               transfer_alloc = VALUES(transfer_alloc),
               revenue_item   = VALUES(revenue_item)
-            """;
+        """;
 
         int affected = 0;
         if (o.items() == null || o.items().isEmpty()) {
@@ -208,8 +233,8 @@ public class SheetStore {
         int rows = jdbc.update("""
         INSERT INTO ghn_orders
           (order_code, is_pr, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
-           bank_collected_at, bank_amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           bank_collected_at, bank_amount, updated_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ON DUPLICATE KEY UPDATE
           is_pr             = VALUES(is_pr),
           client_order_code = VALUES(client_order_code),
@@ -219,7 +244,8 @@ public class SheetStore {
           ship_status       = VALUES(ship_status),
           return_note       = VALUES(return_note),
           bank_collected_at = VALUES(bank_collected_at),
-          bank_amount       = VALUES(bank_amount)
+          bank_amount       = VALUES(bank_amount),
+          updated_ts        = NOW()
         """,
                 go.orderCode(),
                 isPr,
@@ -238,7 +264,6 @@ public class SheetStore {
         return code != null && code.toUpperCase(Locale.ROOT).startsWith("PR");
     }
 
-
     public void upsertGhnOrderFromWhiteRow(WhiteRowDto w) {
         if (w == null) return;
         int isPr = isPrCode(w.getOrderCode()) ? 1 : 0;
@@ -246,8 +271,8 @@ public class SheetStore {
         int rows = jdbc.update("""
         INSERT INTO ghn_orders
           (order_code, is_pr, client_order_code, delivered_at, ship_fee, cod_amount, ship_status, return_note,
-           bank_collected_at, bank_amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           bank_collected_at, bank_amount, updated_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ON DUPLICATE KEY UPDATE
           is_pr             = VALUES(is_pr),
           client_order_code = VALUES(client_order_code),
@@ -257,7 +282,8 @@ public class SheetStore {
           ship_status       = VALUES(ship_status),
           return_note       = VALUES(return_note),
           bank_collected_at = VALUES(bank_collected_at),
-          bank_amount       = VALUES(bank_amount)
+          bank_amount       = VALUES(bank_amount),
+          updated_ts        = NOW()
         """,
                 w.getOrderCode(),
                 isPr,
@@ -271,7 +297,6 @@ public class SheetStore {
         );
         log.debug("Store.upsertGhnOrder(white) code={} affected={}", w.getOrderCode(), rows);
     }
-
 
     /* ===================== helpers ===================== */
     private static Map<String, Object> cast(Map<?, ?> m) {
